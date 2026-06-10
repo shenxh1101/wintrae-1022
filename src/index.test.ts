@@ -7,6 +7,7 @@ import {
   AggregationType,
   ReadingQuality,
   BatchReadingSummary,
+  TimePeriod,
 } from './index';
 
 describe('SmartEnergySDK (Enhanced)', () => {
@@ -461,6 +462,428 @@ describe('SmartEnergySDK (Enhanced)', () => {
 
       const over = sdk.getOverLimitAlerts();
       expect(over.success).toBe(true);
+    });
+  });
+
+  describe('9 - Itemized statistics keep correct energy types and units', () => {
+    let elecId: string;
+    let waterId: string;
+    let gasId: string;
+
+    beforeEach(() => {
+      elecId = sdk.registerDevice({
+        name: '电表-1F',
+        energyType: EnergyType.Electricity,
+        area: 'A区',
+        floor: '1F',
+        building: '主楼',
+        ratedPower: 5000,
+        installDate: '2024-01-15',
+        meterId: 'E-001',
+      }).data.deviceId;
+
+      waterId = sdk.registerDevice({
+        name: '水表-1F',
+        energyType: EnergyType.Water,
+        area: 'A区',
+        floor: '1F',
+        building: '主楼',
+        ratedPower: 0,
+        installDate: '2024-01-15',
+        meterId: 'W-001',
+      }).data.deviceId;
+
+      gasId = sdk.registerDevice({
+        name: '气表-1F',
+        energyType: EnergyType.Gas,
+        area: 'A区',
+        floor: '1F',
+        building: '主楼',
+        ratedPower: 0,
+        installDate: '2024-01-15',
+        meterId: 'G-001',
+      }).data.deviceId;
+
+      sdk.submitReading({ deviceId: elecId, energyType: EnergyType.Electricity, value: 0, unit: 'kWh', timestamp: '2024-05-31T23:00:00Z' });
+      sdk.submitReading({ deviceId: elecId, energyType: EnergyType.Electricity, value: 1000, unit: 'kWh', timestamp: '2024-06-30T23:00:00Z' });
+      sdk.submitReading({ deviceId: waterId, energyType: EnergyType.Water, value: 0, unit: 'm³', timestamp: '2024-05-31T23:00:00Z' });
+      sdk.submitReading({ deviceId: waterId, energyType: EnergyType.Water, value: 200, unit: 'm³', timestamp: '2024-06-30T23:00:00Z' });
+      sdk.submitReading({ deviceId: gasId, energyType: EnergyType.Gas, value: 0, unit: 'm³', timestamp: '2024-05-31T23:00:00Z' });
+      sdk.submitReading({ deviceId: gasId, energyType: EnergyType.Gas, value: 150, unit: 'm³', timestamp: '2024-06-30T23:00:00Z' });
+    });
+
+    test('each energy type keeps its own unit in itemized stats', () => {
+      const stats = sdk.getItemizedStatistics([elecId, waterId, gasId], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z', 'floor');
+      expect(stats.success).toBe(true);
+
+      const elecItem = stats.data.find((s: { energyType: EnergyType }) => s.energyType === EnergyType.Electricity);
+      const waterItem = stats.data.find((s: { energyType: EnergyType }) => s.energyType === EnergyType.Water);
+      const gasItem = stats.data.find((s: { energyType: EnergyType }) => s.energyType === EnergyType.Gas);
+
+      expect(elecItem).toBeTruthy();
+      expect(elecItem?.unit).toBe('kWh');
+      expect(elecItem?.energyType).toBe(EnergyType.Electricity);
+
+      expect(waterItem).toBeTruthy();
+      expect(waterItem?.unit).toBe('m³');
+      expect(waterItem?.energyType).toBe(EnergyType.Water);
+
+      expect(gasItem).toBeTruthy();
+      expect(gasItem?.unit).toBe('m³');
+      expect(gasItem?.energyType).toBe(EnergyType.Gas);
+    });
+
+    test('no item is hardcoded to electricity/kWh', () => {
+      const stats = sdk.getItemizedStatistics([waterId, gasId], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z', 'area');
+      expect(stats.success).toBe(true);
+
+      for (const item of stats.data) {
+        expect(item.energyType).not.toBe(EnergyType.Electricity);
+        expect(item.unit).not.toBe('kWh');
+      }
+    });
+  });
+
+  describe('10 - Area consumption only counts devices in that area', () => {
+    let areaADevice: string;
+    let areaBDevice: string;
+
+    beforeEach(() => {
+      areaADevice = sdk.registerDevice({
+        name: 'A区电表',
+        energyType: EnergyType.Electricity,
+        area: 'A区',
+        floor: '1F',
+        building: '主楼',
+        ratedPower: 5000,
+        installDate: '2024-01-15',
+        meterId: 'A-001',
+      }).data.deviceId;
+
+      areaBDevice = sdk.registerDevice({
+        name: 'B区电表',
+        energyType: EnergyType.Electricity,
+        area: 'B区',
+        floor: '1F',
+        building: '副楼',
+        ratedPower: 3000,
+        installDate: '2024-01-15',
+        meterId: 'B-001',
+      }).data.deviceId;
+
+      sdk.submitReading({ deviceId: areaADevice, energyType: EnergyType.Electricity, value: 0, unit: 'kWh', timestamp: '2024-05-31T23:00:00Z' });
+      sdk.submitReading({ deviceId: areaADevice, energyType: EnergyType.Electricity, value: 500, unit: 'kWh', timestamp: '2024-06-30T23:00:00Z' });
+      sdk.submitReading({ deviceId: areaBDevice, energyType: EnergyType.Electricity, value: 0, unit: 'kWh', timestamp: '2024-05-31T23:00:00Z' });
+      sdk.submitReading({ deviceId: areaBDevice, energyType: EnergyType.Electricity, value: 300, unit: 'kWh', timestamp: '2024-06-30T23:00:00Z' });
+    });
+
+    test('area A query does not include area B device consumption', () => {
+      const result = sdk.queryAreaConsumption('A区', [areaADevice, areaBDevice], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      expect(result.success).toBe(true);
+      expect(result.data.length).toBe(1);
+      expect(result.data[0].consumption).toBe(500);
+      expect(result.data[0].area).toBe('A区');
+    });
+
+    test('area B query returns only area B consumption', () => {
+      const result = sdk.queryAreaConsumption('B区', [areaADevice, areaBDevice], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      expect(result.success).toBe(true);
+      expect(result.data.length).toBe(1);
+      expect(result.data[0].consumption).toBe(300);
+    });
+  });
+
+  describe('11 - Manual correction validation', () => {
+    let deviceId: string;
+    let readingId: string;
+
+    beforeEach(() => {
+      deviceId = sdk.registerDevice({
+        name: '电表',
+        energyType: EnergyType.Electricity,
+        area: 'A区',
+        floor: '1F',
+        building: '主楼',
+        ratedPower: 5000,
+        installDate: '2024-01-15',
+        meterId: 'METER-001',
+      }).data.deviceId;
+
+      const r = sdk.submitReading({ deviceId, energyType: EnergyType.Electricity, value: 1000, unit: 'kWh', timestamp: '2024-06-01T10:00:00Z' });
+      readingId = r.data.readingId;
+    });
+
+    test('correction fails with DEVICE_MISMATCH if deviceId does not match', () => {
+      const result = sdk.syncCorrection({
+        readingId,
+        deviceId: 'wrong-device-id',
+        originalValue: 1000,
+        correctedValue: 1200,
+        reason: '测试',
+        operator: 'test',
+      });
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('DEVICE_MISMATCH');
+    });
+
+    test('correction fails with ORIGINAL_VALUE_MISMATCH if original value does not match', () => {
+      const result = sdk.syncCorrection({
+        readingId,
+        deviceId,
+        originalValue: 9999,
+        correctedValue: 1200,
+        reason: '测试',
+        operator: 'test',
+      });
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('ORIGINAL_VALUE_MISMATCH');
+    });
+
+    test('correction fails with INVALID_VALUE for negative corrected value', () => {
+      const result = sdk.syncCorrection({
+        readingId,
+        deviceId,
+        originalValue: 1000,
+        correctedValue: -100,
+        reason: '测试',
+        operator: 'test',
+      });
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('INVALID_VALUE');
+    });
+
+    test('successful correction updates downstream stats immediately', () => {
+      sdk.submitReading({ deviceId, energyType: EnergyType.Electricity, value: 2000, unit: 'kWh', timestamp: '2024-06-30T10:00:00Z' });
+
+      const before = sdk.queryAreaConsumption('A区', [deviceId], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      expect(before.data[0].consumption).toBe(1000);
+
+      sdk.syncCorrection({
+        readingId,
+        deviceId,
+        originalValue: 1000,
+        correctedValue: 500,
+        reason: '初始表底数错了',
+        operator: '张三',
+      });
+
+      const after = sdk.queryAreaConsumption('A区', [deviceId], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      expect(after.data[0].consumption).toBe(1500);
+
+      const trend = sdk.getTrend([deviceId], EnergyType.Electricity, AggregationType.Month, '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      expect(trend.data.points[0].value).toBe(1500);
+
+      const bill = sdk.generateBill('A区', [deviceId], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      expect(bill.data.totalCost).toBeGreaterThan(0);
+    });
+  });
+
+  describe('12 - Price plan overrides (area and device level)', () => {
+    let areaADevice: string;
+    let areaBDevice: string;
+
+    beforeEach(() => {
+      areaADevice = sdk.registerDevice({
+        name: 'A区电表',
+        energyType: EnergyType.Electricity,
+        area: 'A区',
+        floor: '1F',
+        building: '主楼',
+        ratedPower: 5000,
+        installDate: '2024-01-15',
+        meterId: 'A-001',
+      }).data.deviceId;
+
+      areaBDevice = sdk.registerDevice({
+        name: 'B区电表',
+        energyType: EnergyType.Electricity,
+        area: 'B区',
+        floor: '1F',
+        building: '副楼',
+        ratedPower: 3000,
+        installDate: '2024-01-15',
+        meterId: 'B-001',
+      }).data.deviceId;
+
+      sdk.submitReading({ deviceId: areaADevice, energyType: EnergyType.Electricity, value: 0, unit: 'kWh', timestamp: '2024-05-31T23:00:00Z' });
+      sdk.submitReading({ deviceId: areaADevice, energyType: EnergyType.Electricity, value: 1000, unit: 'kWh', timestamp: '2024-06-30T12:00:00Z' });
+      sdk.submitReading({ deviceId: areaBDevice, energyType: EnergyType.Electricity, value: 0, unit: 'kWh', timestamp: '2024-05-31T23:00:00Z' });
+      sdk.submitReading({ deviceId: areaBDevice, energyType: EnergyType.Electricity, value: 500, unit: 'kWh', timestamp: '2024-06-30T12:00:00Z' });
+    });
+
+    test('default price plan is used when no override exists', () => {
+      const bill = sdk.generateBill('A区', [areaADevice], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      expect(bill.success).toBe(true);
+      expect(bill.data.pricePlans).toBeTruthy();
+      expect(bill.data.pricePlans?.length).toBeGreaterThan(0);
+      expect(bill.data.pricePlans?.[0].planName).toContain('默认');
+    });
+
+    test('area-level price plan override is applied', () => {
+      const before = sdk.generateBill('A区', [areaADevice], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+
+      sdk.setAreaPriceConfig('A区', {
+        energyType: EnergyType.Electricity,
+        planId: 'premium-a',
+        planName: 'A区商业电价',
+        currency: 'CNY',
+        periods: [
+          { period: TimePeriod.Flat, startHour: 0, endHour: 24, rate: 2.0 },
+        ],
+      });
+
+      const after = sdk.generateBill('A区', [areaADevice], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      expect(after.data.pricePlans?.[0].planName).toBe('A区商业电价');
+      expect(after.data.totalCost).toBeGreaterThan(before.data.totalCost);
+    });
+
+    test('area B still uses default plan after area A override', () => {
+      sdk.setAreaPriceConfig('A区', {
+        energyType: EnergyType.Electricity,
+        planId: 'premium-a',
+        planName: 'A区商业电价',
+        currency: 'CNY',
+        periods: [
+          { period: TimePeriod.Flat, startHour: 0, endHour: 24, rate: 2.0 },
+        ],
+      });
+
+      const billB = sdk.generateBill('B区', [areaBDevice], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      expect(billB.data.pricePlans?.[0].planName).toContain('默认');
+    });
+
+    test('bill items are annotated with price plan info', () => {
+      const bill = sdk.generateBill('A区', [areaADevice], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      expect(bill.data.items.length).toBeGreaterThan(0);
+      for (const item of bill.data.items) {
+        expect(item.pricePlanId).toBeTruthy();
+        expect(item.pricePlanName).toBeTruthy();
+      }
+    });
+  });
+
+  describe('13 - Energy ledger by dimension', () => {
+    let elec1F: string;
+    let elec2F: string;
+    let water1F: string;
+
+    beforeEach(() => {
+      elec1F = sdk.registerDevice({
+        name: '1F电表',
+        energyType: EnergyType.Electricity,
+        area: 'A区',
+        floor: '1F',
+        building: '主楼',
+        ratedPower: 5000,
+        installDate: '2024-01-15',
+        meterId: 'E-1F',
+      }).data.deviceId;
+
+      elec2F = sdk.registerDevice({
+        name: '2F电表',
+        energyType: EnergyType.Electricity,
+        area: 'A区',
+        floor: '2F',
+        building: '主楼',
+        ratedPower: 3000,
+        installDate: '2024-01-15',
+        meterId: 'E-2F',
+      }).data.deviceId;
+
+      water1F = sdk.registerDevice({
+        name: '1F水表',
+        energyType: EnergyType.Water,
+        area: 'A区',
+        floor: '1F',
+        building: '主楼',
+        ratedPower: 0,
+        installDate: '2024-01-15',
+        meterId: 'W-1F',
+      }).data.deviceId;
+
+      sdk.submitReading({ deviceId: elec1F, energyType: EnergyType.Electricity, value: 0, unit: 'kWh', timestamp: '2024-05-31T23:00:00Z' });
+      sdk.submitReading({ deviceId: elec1F, energyType: EnergyType.Electricity, value: 1000, unit: 'kWh', timestamp: '2024-06-30T12:00:00Z' });
+      sdk.submitReading({ deviceId: elec2F, energyType: EnergyType.Electricity, value: 0, unit: 'kWh', timestamp: '2024-05-31T23:00:00Z' });
+      sdk.submitReading({ deviceId: elec2F, energyType: EnergyType.Electricity, value: 500, unit: 'kWh', timestamp: '2024-06-30T12:00:00Z' });
+      sdk.submitReading({ deviceId: water1F, energyType: EnergyType.Water, value: 0, unit: 'm³', timestamp: '2024-05-31T23:00:00Z' });
+      sdk.submitReading({ deviceId: water1F, energyType: EnergyType.Water, value: 100, unit: 'm³', timestamp: '2024-06-30T12:00:00Z' });
+    });
+
+    test('floor-dimension ledger groups by floor', () => {
+      const ledger = sdk.getEnergyLedger('floor', [elec1F, elec2F, water1F], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      expect(ledger.success).toBe(true);
+      expect(ledger.data.length).toBe(2);
+
+      const floor1 = ledger.data.find((l: { dimensionValue: string }) => l.dimensionValue === '1F');
+      const floor2 = ledger.data.find((l: { dimensionValue: string }) => l.dimensionValue === '2F');
+
+      expect(floor1).toBeTruthy();
+      expect(floor1?.deviceCount).toBe(2);
+      expect(floor1?.items.length).toBe(2);
+
+      expect(floor2).toBeTruthy();
+      expect(floor2?.deviceCount).toBe(1);
+      expect(floor2?.items.length).toBe(1);
+    });
+
+    test('area-dimension ledger has one entry per area', () => {
+      const ledger = sdk.getEnergyLedger('area', [elec1F, elec2F, water1F], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      expect(ledger.success).toBe(true);
+      expect(ledger.data.length).toBe(1);
+      expect(ledger.data[0].dimensionValue).toBe('A区');
+      expect(ledger.data[0].deviceCount).toBe(3);
+      expect(ledger.data[0].items.length).toBe(2);
+    });
+
+    test('device-dimension ledger has one entry per device', () => {
+      const ledger = sdk.getEnergyLedger('device', [elec1F, elec2F], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      expect(ledger.success).toBe(true);
+      expect(ledger.data.length).toBe(2);
+      for (const entry of ledger.data) {
+        expect(entry.dimension).toBe('device');
+        expect(entry.dimensionLabel).toBeTruthy();
+        expect(entry.deviceCount).toBe(1);
+      }
+    });
+
+    test('ledger items have correct units and cost', () => {
+      const ledger = sdk.getEnergyLedger('floor', [elec1F, water1F], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      const floor1 = ledger.data.find((l: { dimensionValue: string }) => l.dimensionValue === '1F');
+      expect(floor1).toBeTruthy();
+
+      const elecItem = floor1?.items.find((i: { energyType: EnergyType }) => i.energyType === EnergyType.Electricity);
+      const waterItem = floor1?.items.find((i: { energyType: EnergyType }) => i.energyType === EnergyType.Water);
+
+      expect(elecItem?.unit).toBe('kWh');
+      expect(elecItem?.consumption).toBe(1000);
+      expect(elecItem?.cost).toBeGreaterThan(0);
+
+      expect(waterItem?.unit).toBe('m³');
+      expect(waterItem?.consumption).toBe(100);
+      expect(waterItem?.cost).toBeGreaterThan(0);
+    });
+
+    test('ledger includes peak/valley/flat breakdown', () => {
+      const ledger = sdk.getEnergyLedger('area', [elec1F], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      const item = ledger.data[0].items.find((i: { energyType: EnergyType }) => i.energyType === EnergyType.Electricity);
+      expect(item).toBeTruthy();
+      expect(typeof item?.peakConsumption).toBe('number');
+      expect(typeof item?.valleyConsumption).toBe('number');
+      expect(typeof item?.flatConsumption).toBe('number');
+      expect(item?.peakConsumption! + item?.valleyConsumption! + item?.flatConsumption!).toBeCloseTo(item?.consumption || 0, 1);
+    });
+
+    test('ledger detail includes device breakdown', () => {
+      const detail = sdk.getLedgerDetail('floor', [elec1F, elec2F, water1F], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      expect(detail.success).toBe(true);
+      expect(detail.data.ledgers.length).toBe(2);
+      expect(detail.data.deviceBreakdown.length).toBe(2);
+
+      const floor1Breakdown = detail.data.deviceBreakdown.find((d: { dimensionValue: string }) => d.dimensionValue === '1F');
+      expect(floor1Breakdown).toBeTruthy();
+      expect(floor1Breakdown?.devices.length).toBe(2);
+      expect(floor1Breakdown?.devices[0].deviceName).toBeTruthy();
+      expect(floor1Breakdown?.devices[0].items.length).toBeGreaterThan(0);
     });
   });
 });

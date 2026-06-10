@@ -83,37 +83,31 @@ export class EnergyStatistics {
       }
     }
 
-    const grandTotal = Array.from(categoryMap.values()).reduce((sum, typeMap) => {
-      for (const { total } of typeMap.values()) {
-        sum += total;
+    const energyTypeTotals: Map<EnergyType, number> = new Map();
+    for (const typeMap of categoryMap.values()) {
+      for (const [energyType, { total }] of typeMap) {
+        energyTypeTotals.set(energyType, (energyTypeTotals.get(energyType) || 0) + total);
       }
-      return sum;
-    }, 0);
+    }
 
     const results: ItemizedStat[] = [];
     for (const [category, typeMap] of categoryMap) {
-      const categoryTotal = Array.from(typeMap.values()).reduce((s, v) => s + v.total, 0);
-      const subItems: ItemizedStat[] = [];
-
       for (const [energyType, { total, unit }] of typeMap) {
-        subItems.push({
-          category: energyType,
+        const typeTotal = energyTypeTotals.get(energyType) || 0;
+        results.push({
+          category,
           energyType,
           consumption: Math.round(total * 1000) / 1000,
           unit,
-          percentage: categoryTotal > 0 ? Math.round((total / categoryTotal) * 10000) / 100 : 0,
+          percentage: typeTotal > 0 ? Math.round((total / typeTotal) * 10000) / 100 : 0,
         });
       }
-
-      results.push({
-        category,
-        energyType: EnergyType.Electricity,
-        consumption: Math.round(categoryTotal * 1000) / 1000,
-        unit: 'kWh',
-        percentage: grandTotal > 0 ? Math.round((categoryTotal / grandTotal) * 10000) / 100 : 0,
-        subItems,
-      });
     }
+
+    results.sort((a, b) => {
+      if (a.category !== b.category) return a.category.localeCompare(b.category);
+      return a.energyType.localeCompare(b.energyType);
+    });
 
     return createSuccessResult(results);
   }

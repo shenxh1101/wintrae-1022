@@ -28,6 +28,9 @@ import {
   AggregationType,
   ReadingQuality,
   BillItem,
+  EnergyLedger,
+  EnergyLedgerItem,
+  TimePeriod,
 } from './types';
 
 export class SmartEnergySDK {
@@ -119,7 +122,12 @@ export class SmartEnergySDK {
     startTime: string,
     endTime: string,
   ): SDKResult<AreaConsumption[]> {
-    const deltas = this.getDeltas(deviceIds, startTime, endTime);
+    const areaDevicesResult = this.deviceArchive.queryByArea(area);
+    const areaDeviceIds = areaDevicesResult.success
+      ? areaDevicesResult.data.map(d => d.deviceId)
+      : [];
+    const filteredIds = deviceIds.filter(id => areaDeviceIds.includes(id));
+    const deltas = this.getDeltas(filteredIds, startTime, endTime);
     return this.energyStatistics.queryAreaConsumption(area, deltas);
   }
 
@@ -170,9 +178,10 @@ export class SmartEnergySDK {
     deviceIds: string[],
     startTime: string,
     endTime: string,
+    area?: string,
   ): SDKResult<BillItem[]> {
     const deltas = this.getDeltas(deviceIds, startTime, endTime);
-    return this.peakValleyCalculator.calculateFee(energyType, deltas);
+    return this.peakValleyCalculator.calculateFee(energyType, deltas, area);
   }
 
   generateBill(
@@ -181,7 +190,12 @@ export class SmartEnergySDK {
     startTime: string,
     endTime: string,
   ): SDKResult<BillSummary> {
-    const deltas = this.getDeltas(deviceIds, startTime, endTime);
+    const areaDevicesResult = this.deviceArchive.queryByArea(area);
+    const areaDeviceIds = areaDevicesResult.success
+      ? areaDevicesResult.data.map(d => d.deviceId)
+      : [];
+    const filteredIds = deviceIds.filter(id => areaDeviceIds.includes(id));
+    const deltas = this.getDeltas(filteredIds, startTime, endTime);
     return this.peakValleyCalculator.generateBill(area, deltas, startTime, endTime);
   }
 
@@ -301,6 +315,347 @@ export class SmartEnergySDK {
     this.peakValleyCalculator.updateConfig(config);
   }
 
+  setAreaPriceConfig(area: string, config: PeakValleyConfig): void {
+    this.peakValleyCalculator.setAreaPriceConfig(area, config);
+  }
+
+  setDevicePriceConfig(deviceId: string, config: PeakValleyConfig): void {
+    this.peakValleyCalculator.setDevicePriceConfig(deviceId, config);
+  }
+
+  getEnergyLedger(
+    dimension: 'area' | 'building' | 'floor' | 'device',
+    deviceIds: string[],
+    startTime: string,
+    endTime: string,
+  ): SDKResult<EnergyLedger[]> {
+    const deviceMap = new Map<string, DeviceProfile>();
+    const allDevices = this.deviceArchive.listAll();
+    if (allDevices.success) {
+      for (const d of allDevices.data) {
+        if (deviceIds.includes(d.deviceId)) {
+          deviceMap.set(d.deviceId, d);
+        }
+      }
+    }
+
+    const deltas = this.getDeltas(deviceIds, startTime, endTime);
+
+    const groups: Map<string, { devices: Set<string>; deltas: ConsumptionDelta[] }> = new Map();
+
+    for (const delta of deltas) {
+      const device = deviceMap.get(delta.deviceId);
+      if (!device) continue;
+
+      let dimValue: string;
+      switch (dimension) {
+        case 'area':
+          dimValue = device.area;
+          break;
+        case 'building':
+          dimValue = device.building;
+          break;
+        case 'floor':
+          dimValue = device.floor;
+          break;
+        case 'device':
+          dimValue = device.deviceId;
+          break;
+        default:
+          dimValue = device.area;
+      }
+
+      if (!groups.has(dimValue)) {
+        groups.set(dimValue, { devices: new Set(), deltas: [] });
+      }
+      const group = groups.get(dimValue)!;
+      group.devices.add(delta.deviceId);
+      group.deltas.push(delta);
+    }
+
+    const ledgers: EnergyLedger[] = [];
+    for (const [dimValue, group] of groups) {
+      const energyTypes = new Set(group.deltas.map(d => d.reading.energyType));
+      const items: EnergyLedgerItem[] = [];
+      let totalCost = 0;
+      let currency = 'CNY';
+
+      for (const et of energyTypes) {
+        const typeDeltas = group.deltas.filter(d => d.reading.energyType === et);
+        const totalConsumption = typeDeltas.reduce((s, d) => s + d.consumption, 0);
+        const firstDelta = typeDeltas[0];
+
+        const areaForPricing = dimension === 'area' ? dimValue : undefined;
+        const config = this.peakValleyCalculator.getEffectiveConfig(et, areaForPricing);
+        currency = config.currency;
+
+        const byPeriod: Map<TimePeriod, { consumption: number; cost: number }> = new Map();
+        for (const delta of typeDeltas) {
+          let period: TimePeriod;
+          if (delta.reading.period) {
+            period = delta.reading.period;
+          } else {
+            const hour = new Date(delta.reading.timestamp).getUTCHours();
+            const rateConfig = config.periods.find(p => {
+              if (p.startHour <= p.endHour) {
+                return hour >= p.startHour && hour < p.endHour;
+              }
+              return hour >= p.startHour || hour < p.endHour;
+            });
+            period = rateConfig?.period || TimePeriod.Flat;
+          }
+          const rateConfig = config.periods.find(p => p.period === period);
+          const rate = rateConfig?.rate || 1.0;
+          const existing = byPeriod.get(period);
+          if (existing) {
+            existing.consumption += delta.consumption;
+            existing.cost += delta.consumption * rate;
+          } else {
+            byPeriod.set(period, {
+              consumption: delta.consumption,
+              cost: delta.consumption * rate,
+            });
+          }
+        }
+
+        const peak = byPeriod.get(TimePeriod.Peak);
+        const valley = byPeriod.get(TimePeriod.Valley);
+        const flat = byPeriod.get(TimePeriod.Flat);
+        const typeCost = Array.from(byPeriod.values()).reduce((s, v) => s + v.cost, 0);
+        totalCost += typeCost;
+
+        items.push({
+          energyType: et,
+          consumption: Math.round(totalConsumption * 1000) / 1000,
+          unit: firstDelta.reading.unit,
+          cost: Math.round(typeCost * 100) / 100,
+          currency: config.currency,
+          peakConsumption: peak ? Math.round(peak.consumption * 1000) / 1000 : 0,
+          valleyConsumption: valley ? Math.round(valley.consumption * 1000) / 1000 : 0,
+          flatConsumption: flat ? Math.round(flat.consumption * 1000) / 1000 : 0,
+          peakCost: peak ? Math.round(peak.cost * 100) / 100 : 0,
+          valleyCost: valley ? Math.round(valley.cost * 100) / 100 : 0,
+          flatCost: flat ? Math.round(flat.cost * 100) / 100 : 0,
+          pricePlanId: config.planId,
+          pricePlanName: config.planName,
+        });
+      }
+
+      const device = dimension === 'device' ? deviceMap.get(dimValue) : undefined;
+
+      ledgers.push({
+        ledgerId: `ldg-${dimValue}-${Date.now()}`,
+        dimension,
+        dimensionValue: dimValue,
+        dimensionLabel: device?.name,
+        startDate: startTime,
+        endDate: endTime,
+        items,
+        totalCost: Math.round(totalCost * 100) / 100,
+        currency,
+        deviceCount: group.devices.size,
+        generatedAt: new Date().toISOString(),
+      });
+    }
+
+    ledgers.sort((a, b) => a.dimensionValue.localeCompare(b.dimensionValue));
+
+    return {
+      success: true,
+      code: 'SUCCESS',
+      message: `生成${dimension}维度台账，共 ${ledgers.length} 条`,
+      data: ledgers,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  getLedgerDetail(
+    dimension: 'area' | 'building' | 'floor' | 'device',
+    deviceIds: string[],
+    startTime: string,
+    endTime: string,
+  ): SDKResult<{
+    ledgers: EnergyLedger[];
+    deviceBreakdown: {
+      dimensionValue: string;
+      devices: {
+        deviceId: string;
+        deviceName: string;
+        area: string;
+        items: EnergyLedgerItem[];
+      }[];
+    }[];
+  }> {
+    const ledgerResult = this.getEnergyLedger(dimension, deviceIds, startTime, endTime);
+    if (!ledgerResult.success) {
+      return {
+        success: false,
+        code: ledgerResult.code,
+        message: ledgerResult.message,
+        data: { ledgers: [], deviceBreakdown: [] },
+        timestamp: new Date().toISOString(),
+      };
+    }
+
+    const deviceMap = new Map<string, DeviceProfile>();
+    const allDevices = this.deviceArchive.listAll();
+    if (allDevices.success) {
+      for (const d of allDevices.data) {
+        if (deviceIds.includes(d.deviceId)) {
+          deviceMap.set(d.deviceId, d);
+        }
+      }
+    }
+
+    const deltas = this.getDeltas(deviceIds, startTime, endTime);
+
+    const dimToDevices: Map<string, Map<string, ConsumptionDelta[]>> = new Map();
+
+    for (const delta of deltas) {
+      const device = deviceMap.get(delta.deviceId);
+      if (!device) continue;
+
+      let dimValue: string;
+      switch (dimension) {
+        case 'area':
+          dimValue = device.area;
+          break;
+        case 'building':
+          dimValue = device.building;
+          break;
+        case 'floor':
+          dimValue = device.floor;
+          break;
+        case 'device':
+          dimValue = device.deviceId;
+          break;
+        default:
+          dimValue = device.area;
+      }
+
+      if (!dimToDevices.has(dimValue)) {
+        dimToDevices.set(dimValue, new Map());
+      }
+      const deviceMapInner = dimToDevices.get(dimValue)!;
+      if (!deviceMapInner.has(delta.deviceId)) {
+        deviceMapInner.set(delta.deviceId, []);
+      }
+      deviceMapInner.get(delta.deviceId)!.push(delta);
+    }
+
+    const deviceBreakdown: {
+      dimensionValue: string;
+      devices: {
+        deviceId: string;
+        deviceName: string;
+        area: string;
+        items: EnergyLedgerItem[];
+      }[];
+    }[] = [];
+
+    for (const [dimValue, deviceDeltas] of dimToDevices) {
+      const devices: {
+        deviceId: string;
+        deviceName: string;
+        area: string;
+        items: EnergyLedgerItem[];
+      }[] = [];
+
+      for (const [devId, devDeltas] of deviceDeltas) {
+        const dev = deviceMap.get(devId);
+        if (!dev) continue;
+
+        const energyTypes = new Set(devDeltas.map(d => d.reading.energyType));
+        const items: EnergyLedgerItem[] = [];
+
+        for (const et of energyTypes) {
+          const typeDeltas = devDeltas.filter(d => d.reading.energyType === et);
+          const totalConsumption = typeDeltas.reduce((s, d) => s + d.consumption, 0);
+          const firstDelta = typeDeltas[0];
+
+          const config = this.peakValleyCalculator.getEffectiveConfig(et, dev.area);
+
+          const byPeriod: Map<TimePeriod, { consumption: number; cost: number }> = new Map();
+          for (const delta of typeDeltas) {
+            let period: TimePeriod;
+            if (delta.reading.period) {
+              period = delta.reading.period;
+            } else {
+              const hour = new Date(delta.reading.timestamp).getUTCHours();
+              const rateConfig = config.periods.find(p => {
+                if (p.startHour <= p.endHour) {
+                  return hour >= p.startHour && hour < p.endHour;
+                }
+                return hour >= p.startHour || hour < p.endHour;
+              });
+              period = rateConfig?.period || TimePeriod.Flat;
+            }
+            const rateConfig = config.periods.find(p => p.period === period);
+            const rate = rateConfig?.rate || 1.0;
+            const existing = byPeriod.get(period);
+            if (existing) {
+              existing.consumption += delta.consumption;
+              existing.cost += delta.consumption * rate;
+            } else {
+              byPeriod.set(period, {
+                consumption: delta.consumption,
+                cost: delta.consumption * rate,
+              });
+            }
+          }
+
+          const peak = byPeriod.get(TimePeriod.Peak);
+          const valley = byPeriod.get(TimePeriod.Valley);
+          const flat = byPeriod.get(TimePeriod.Flat);
+          const typeCost = Array.from(byPeriod.values()).reduce((s, v) => s + v.cost, 0);
+
+          items.push({
+            energyType: et,
+            consumption: Math.round(totalConsumption * 1000) / 1000,
+            unit: firstDelta.reading.unit,
+            cost: Math.round(typeCost * 100) / 100,
+            currency: config.currency,
+            peakConsumption: peak ? Math.round(peak.consumption * 1000) / 1000 : 0,
+            valleyConsumption: valley ? Math.round(valley.consumption * 1000) / 1000 : 0,
+            flatConsumption: flat ? Math.round(flat.consumption * 1000) / 1000 : 0,
+            peakCost: peak ? Math.round(peak.cost * 100) / 100 : 0,
+            valleyCost: valley ? Math.round(valley.cost * 100) / 100 : 0,
+            flatCost: flat ? Math.round(flat.cost * 100) / 100 : 0,
+            pricePlanId: config.planId,
+            pricePlanName: config.planName,
+          });
+        }
+
+        devices.push({
+          deviceId: devId,
+          deviceName: dev.name,
+          area: dev.area,
+          items,
+        });
+      }
+
+      devices.sort((a, b) => a.deviceName.localeCompare(b.deviceName));
+
+      deviceBreakdown.push({
+        dimensionValue: dimValue,
+        devices,
+      });
+    }
+
+    deviceBreakdown.sort((a, b) => a.dimensionValue.localeCompare(b.dimensionValue));
+
+    return {
+      success: true,
+      code: 'SUCCESS',
+      message: '明细台账生成成功',
+      data: {
+        ledgers: ledgerResult.data,
+        deviceBreakdown,
+      },
+      timestamp: new Date().toISOString(),
+    };
+  }
+
   setAnomalyThreshold(threshold: number): void {
     this.anomalyDetector.setThreshold(threshold);
   }
@@ -343,6 +698,9 @@ export type {
   TrendResult,
   AreaConsumption,
   ItemizedStat,
+  EnergyLedgerItem,
+  EnergyLedger,
+  EnergyLedgerDetail,
   SDKResult,
   PaginatedResult,
   SDKConfig,

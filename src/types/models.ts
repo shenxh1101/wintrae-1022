@@ -61,6 +61,8 @@ export interface PeakValleyConfig {
   energyType: EnergyType;
   periods: PeakValleyPeriod[];
   currency: string;
+  planId?: string;
+  planName?: string;
 }
 
 export interface AnomalyRecord {
@@ -117,6 +119,8 @@ export interface BillItem {
   consumption: number;
   rate: number;
   cost: number;
+  pricePlanId?: string;
+  pricePlanName?: string;
 }
 
 export interface BillSummary {
@@ -128,6 +132,7 @@ export interface BillSummary {
   totalCost: number;
   currency: string;
   generatedAt: string;
+  pricePlans?: { energyType: EnergyType; planId: string; planName: string }[];
 }
 
 export interface TrendPoint {
@@ -159,6 +164,45 @@ export interface ItemizedStat {
   unit: string;
   percentage: number;
   subItems?: ItemizedStat[];
+}
+
+export interface EnergyLedgerItem {
+  energyType: EnergyType;
+  consumption: number;
+  unit: string;
+  cost: number;
+  currency: string;
+  peakConsumption?: number;
+  valleyConsumption?: number;
+  flatConsumption?: number;
+  peakCost?: number;
+  valleyCost?: number;
+  flatCost?: number;
+  pricePlanId?: string;
+  pricePlanName?: string;
+}
+
+export interface EnergyLedger {
+  ledgerId: string;
+  dimension: 'area' | 'building' | 'floor' | 'device';
+  dimensionValue: string;
+  dimensionLabel?: string;
+  startDate: string;
+  endDate: string;
+  items: EnergyLedgerItem[];
+  totalCost: number;
+  currency: string;
+  deviceCount: number;
+  generatedAt: string;
+}
+
+export interface EnergyLedgerDetail {
+  ledger: EnergyLedger;
+  deviceBreakdown: {
+    deviceId: string;
+    deviceName: string;
+    items: EnergyLedgerItem[];
+  }[];
 }
 
 export interface SDKResult<T> {

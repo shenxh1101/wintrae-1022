@@ -168,6 +168,27 @@ export class ReadingValidator {
       return createErrorResult('READING_NOT_FOUND', `读数未找到: ${correction.readingId}`);
     }
 
+    if (correction.deviceId !== reading.deviceId) {
+      return createErrorResult(
+        'DEVICE_MISMATCH',
+        `修正记录设备ID不匹配：修正指定 ${correction.deviceId}，读数实际所属 ${reading.deviceId}`,
+      );
+    }
+
+    if (correction.originalValue !== reading.value) {
+      return createErrorResult(
+        'ORIGINAL_VALUE_MISMATCH',
+        `原始值不匹配：修正指定 ${correction.originalValue}，读数当前值 ${reading.value}`,
+      );
+    }
+
+    if (correction.correctedValue === undefined || correction.correctedValue === null || Number.isNaN(correction.correctedValue)) {
+      return createErrorResult('INVALID_VALUE', `无效的修正值: ${correction.correctedValue}`);
+    }
+    if (correction.correctedValue < 0) {
+      return createErrorResult('INVALID_VALUE', `修正值不能为负数: ${correction.correctedValue}`);
+    }
+
     const correctionId = generateId('cor');
     const fullCorrection: ManualCorrection = {
       ...correction,
