@@ -1,0 +1,20 @@
+{
+  "name": "smart-energy-sdk",
+  "version": "1.0.0",
+  "description": "Smart Energy SDK for Building Management Systems",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "jest --config jest.config.js"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "@types/jest": "^29.5.11",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.1"
+  },
+  "files": [
+    "dist"
+  ]
+}
