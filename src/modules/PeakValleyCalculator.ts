@@ -4,6 +4,7 @@ import {
   PeakValleyPeriod,
   BillItem,
   BillSummary,
+  BillDeviceItem,
   TimePeriod,
   EnergyType,
   SDKResult,
@@ -181,6 +182,74 @@ export class PeakValleyCalculator {
     return createSuccessResult(items);
   }
 
+  calculateFeeForDevice(
+    device: DeviceProfile,
+    deltas: ConsumptionDelta[],
+  ): BillDeviceItem {
+    const deviceDeltas = deltas.filter(d => d.deviceId === device.deviceId);
+    const energyTypes = new Set(deviceDeltas.map(d => d.reading.energyType));
+    const allItems: BillItem[] = [];
+    let totalConsumption = 0;
+    let totalCost = 0;
+    let unit = '';
+    let planId = '';
+    let planName = '';
+    let primaryEnergy = EnergyType.Electricity;
+
+    for (const et of energyTypes) {
+      primaryEnergy = et;
+      const typeDeltas = deviceDeltas.filter(d => d.reading.energyType === et);
+      const config = this.getEffectiveConfig(et, device.area, device.deviceId);
+      planId = config.planId || '';
+      planName = config.planName || '';
+
+      const consumptionByPeriod: Map<TimePeriod, number> = new Map();
+      for (const delta of typeDeltas) {
+        let period: TimePeriod;
+        if (delta.reading.period) {
+          period = delta.reading.period;
+        } else {
+          const hour = new Date(delta.reading.timestamp).getUTCHours();
+          period = this.findPeriod(config.periods, hour);
+        }
+        consumptionByPeriod.set(period, (consumptionByPeriod.get(period) || 0) + delta.consumption);
+      }
+
+      for (const [period, consumption] of consumptionByPeriod) {
+        const rateConfig = config.periods.find(p => p.period === period);
+        const rate = rateConfig ? rateConfig.rate : 1.0;
+        const cost = consumption * rate;
+        totalConsumption += consumption;
+        totalCost += cost;
+        allItems.push({
+          energyType: et,
+          period,
+          consumption: Math.round(consumption * 1000) / 1000,
+          rate,
+          cost: Math.round(cost * 100) / 100,
+          pricePlanId: config.planId,
+          pricePlanName: config.planName,
+        });
+      }
+
+      if (typeDeltas.length > 0 && !unit) {
+        unit = typeDeltas[0].reading.unit;
+      }
+    }
+
+    return {
+      deviceId: device.deviceId,
+      deviceName: device.name,
+      energyType: primaryEnergy,
+      items: allItems,
+      totalConsumption: Math.round(totalConsumption * 1000) / 1000,
+      totalCost: Math.round(totalCost * 100) / 100,
+      unit,
+      pricePlanId: planId || undefined,
+      pricePlanName: planName || undefined,
+    };
+  }
+
   generateBill(
     area: string,
     deltas: ConsumptionDelta[],
@@ -188,73 +257,122 @@ export class PeakValleyCalculator {
     endDate: string,
     deviceProfiles?: Map<string, DeviceProfile>,
   ): SDKResult<BillSummary> {
-    const energyTypes = new Set(deltas.map(d => d.reading.energyType));
-    const allItems: BillItem[] = [];
+    const deviceBreakdown: BillDeviceItem[] = [];
+    const summaryItems: Map<string, BillItem> = new Map();
+    const consumptionByType: Map<EnergyType, { consumption: number; unit: string; cost: number }> = new Map();
+    const usedPlansSet: Map<EnergyType, Set<string>> = new Map();
     let totalCost = 0;
-    const usedPlans: { energyType: EnergyType; planId: string; planName: string }[] = [];
+    let currency = 'CNY';
 
-    for (const et of energyTypes) {
-      const config = this.getEffectiveConfig(et, area);
-      usedPlans.push({
-        energyType: et,
-        planId: config.planId || `default-${et}`,
-        planName: config.planName || `默认${et}方案`,
-      });
+    const deviceIds = new Set(deltas.map(d => d.deviceId));
 
-      const typeDeltas = deltas.filter(d => d.reading.energyType === et);
-      const result = this.calculateFeeForDeltas(typeDeltas, config);
-      allItems.push(...result);
-      totalCost += result.reduce((sum, item) => sum + item.cost, 0);
+    for (const deviceId of deviceIds) {
+      const device = deviceProfiles?.get(deviceId);
+      if (!device) continue;
+
+      const deviceItem = this.calculateFeeForDevice(device, deltas);
+      deviceBreakdown.push(deviceItem);
+      totalCost += deviceItem.totalCost;
+
+      const firstItemWithConfig = deviceItem.items.find(i => i.pricePlanId);
+      if (firstItemWithConfig && firstItemWithConfig.pricePlanId) {
+        const et = firstItemWithConfig.energyType;
+        if (!usedPlansSet.has(et)) {
+          usedPlansSet.set(et, new Set());
+        }
+        usedPlansSet.get(et)!.add(firstItemWithConfig.pricePlanId);
+      }
+
+      for (const item of deviceItem.items) {
+        const key = `${item.energyType}-${item.period}`;
+        const existing = summaryItems.get(key);
+        if (existing) {
+          existing.consumption += item.consumption;
+          existing.cost += item.cost;
+        } else {
+          summaryItems.set(key, { ...item });
+        }
+
+        const typeStat = consumptionByType.get(item.energyType);
+        if (typeStat) {
+          typeStat.consumption += item.consumption;
+          typeStat.cost += item.cost;
+        } else {
+          consumptionByType.set(item.energyType, {
+            consumption: item.consumption,
+            unit: '',
+            cost: item.cost,
+          });
+        }
+      }
     }
 
-    const defaultConfig = this.defaultConfigs.get(EnergyType.Electricity);
+    for (const [et, stat] of consumptionByType) {
+      const etItems = deviceBreakdown
+        .flatMap(d => d.items)
+        .filter(i => i.energyType === et);
+      if (etItems.length > 0) {
+        stat.unit = etItems[0].period ? '' : etItems[0].period as unknown as string;
+        const deltaItems = deltas.filter(d => d.reading.energyType === et);
+        if (deltaItems.length > 0) {
+          stat.unit = deltaItems[0].reading.unit;
+        }
+      }
+      stat.consumption = Math.round(stat.consumption * 1000) / 1000;
+      stat.cost = Math.round(stat.cost * 100) / 100;
+    }
+
+    const finalSummaryItems: BillItem[] = Array.from(summaryItems.values()).map(item => ({
+      ...item,
+      consumption: Math.round(item.consumption * 1000) / 1000,
+      cost: Math.round(item.cost * 100) / 100,
+      rate: item.consumption > 0 ? Math.round((item.cost / item.consumption) * 10000) / 10000 : item.rate,
+    }));
+
+    finalSummaryItems.sort((a, b) => {
+      if (a.energyType !== b.energyType) return a.energyType.localeCompare(b.energyType);
+      return a.period.localeCompare(b.period);
+    });
+
+    deviceBreakdown.sort((a, b) => a.deviceName.localeCompare(b.deviceName));
+
+    const pricePlans: { energyType: EnergyType; planId: string; planName: string }[] = [];
+    for (const [et, planIds] of usedPlansSet) {
+      for (const planId of planIds) {
+        const config = this.getEffectiveConfig(et, area);
+        pricePlans.push({
+          energyType: et,
+          planId,
+          planName: config.planName || planId,
+        });
+      }
+    }
+
+    const totalConsumptionByType = Array.from(consumptionByType.entries()).map(([energyType, stat]) => ({
+      energyType,
+      consumption: stat.consumption,
+      unit: stat.unit,
+      cost: stat.cost,
+    }));
+
+    const firstConfig = this.getEffectiveConfig(EnergyType.Electricity, area);
+    currency = firstConfig.currency;
+
     const bill: BillSummary = {
       billId: generateId('bill'),
       area,
       startDate,
       endDate,
-      items: allItems,
+      items: finalSummaryItems,
       totalCost: Math.round(totalCost * 100) / 100,
-      currency: defaultConfig?.currency || 'CNY',
+      totalConsumptionByType,
+      currency,
       generatedAt: new Date().toISOString(),
-      pricePlans: usedPlans,
+      pricePlans,
+      deviceBreakdown,
     };
 
     return createSuccessResult(bill);
-  }
-
-  private calculateFeeForDeltas(
-    deltas: ConsumptionDelta[],
-    config: PeakValleyConfig,
-  ): BillItem[] {
-    const consumptionByPeriod: Map<TimePeriod, number> = new Map();
-    for (const delta of deltas) {
-      let period: TimePeriod;
-      if (delta.reading.period) {
-        period = delta.reading.period;
-      } else {
-        const hour = new Date(delta.reading.timestamp).getUTCHours();
-        period = this.findPeriod(config.periods, hour);
-      }
-      consumptionByPeriod.set(period, (consumptionByPeriod.get(period) || 0) + delta.consumption);
-    }
-
-    const items: BillItem[] = [];
-    for (const [period, consumption] of consumptionByPeriod) {
-      const rateConfig = config.periods.find(p => p.period === period);
-      const rate = rateConfig ? rateConfig.rate : 1.0;
-      items.push({
-        energyType: config.energyType,
-        period,
-        consumption: Math.round(consumption * 1000) / 1000,
-        rate,
-        cost: Math.round(consumption * rate * 100) / 100,
-        pricePlanId: config.planId,
-        pricePlanName: config.planName,
-      });
-    }
-
-    return items;
   }
 
   getConfig(energyType: EnergyType): PeakValleyConfig | undefined {

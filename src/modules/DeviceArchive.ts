@@ -58,6 +58,16 @@ export class DeviceArchive {
     return createSuccessResult(results);
   }
 
+  queryByGroup(deviceGroup: string): SDKResult<DeviceProfile[]> {
+    const results: DeviceProfile[] = [];
+    for (const device of this.devices.values()) {
+      if (device.deviceGroup === deviceGroup) {
+        results.push(device);
+      }
+    }
+    return createSuccessResult(results);
+  }
+
   update(deviceId: string, updates: Partial<Omit<DeviceProfile, 'deviceId'>>): SDKResult<DeviceProfile> {
     const device = this.devices.get(deviceId);
     if (!device) {

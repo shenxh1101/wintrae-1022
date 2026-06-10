@@ -14,6 +14,7 @@ export interface DeviceProfile {
   area: string;
   floor: string;
   building: string;
+  deviceGroup?: string;
   status: DeviceStatus;
   ratedPower: number;
   installDate: string;
@@ -123,6 +124,18 @@ export interface BillItem {
   pricePlanName?: string;
 }
 
+export interface BillDeviceItem {
+  deviceId: string;
+  deviceName: string;
+  energyType: EnergyType;
+  items: BillItem[];
+  totalConsumption: number;
+  totalCost: number;
+  unit: string;
+  pricePlanId?: string;
+  pricePlanName?: string;
+}
+
 export interface BillSummary {
   billId: string;
   area: string;
@@ -130,9 +143,11 @@ export interface BillSummary {
   endDate: string;
   items: BillItem[];
   totalCost: number;
+  totalConsumptionByType?: { energyType: EnergyType; consumption: number; unit: string; cost: number }[];
   currency: string;
   generatedAt: string;
   pricePlans?: { energyType: EnergyType; planId: string; planName: string }[];
+  deviceBreakdown?: BillDeviceItem[];
 }
 
 export interface TrendPoint {
@@ -184,7 +199,7 @@ export interface EnergyLedgerItem {
 
 export interface EnergyLedger {
   ledgerId: string;
-  dimension: 'area' | 'building' | 'floor' | 'device';
+  dimension: 'area' | 'building' | 'floor' | 'device' | 'deviceGroup';
   dimensionValue: string;
   dimensionLabel?: string;
   startDate: string;
@@ -202,6 +217,40 @@ export interface EnergyLedgerDetail {
     deviceId: string;
     deviceName: string;
     items: EnergyLedgerItem[];
+  }[];
+}
+
+export interface BillReconciliationItem {
+  energyType: EnergyType;
+  areaTotal: number;
+  floorTotal: number;
+  deviceTotal: number;
+  areaVsFloorDiff: number;
+  floorVsDeviceDiff: number;
+  areaVsDeviceDiff: number;
+  unit: string;
+  isBalanced: boolean;
+}
+
+export interface BillReconciliationResult {
+  area: string;
+  startDate: string;
+  endDate: string;
+  items: BillReconciliationItem[];
+  totalAreaCost: number;
+  totalFloorCost: number;
+  totalDeviceCost: number;
+  overallDiff: number;
+  isBalanced: boolean;
+  currency: string;
+  discrepancyDetails?: {
+    dimension: string;
+    dimensionValue: string;
+    energyType: EnergyType;
+    expected: number;
+    actual: number;
+    diff: number;
+    unit: string;
   }[];
 }
 

@@ -19,6 +19,8 @@ import {
   EnergySavingSuggestion,
   EfficiencyRanking,
   BillSummary,
+  BillReconciliationResult,
+  BillReconciliationItem,
   TrendResult,
   AreaConsumption,
   ItemizedStat,
@@ -196,7 +198,17 @@ export class SmartEnergySDK {
       : [];
     const filteredIds = deviceIds.filter(id => areaDeviceIds.includes(id));
     const deltas = this.getDeltas(filteredIds, startTime, endTime);
-    return this.peakValleyCalculator.generateBill(area, deltas, startTime, endTime);
+
+    const deviceMap = new Map<string, DeviceProfile>();
+    if (areaDevicesResult.success) {
+      for (const d of areaDevicesResult.data) {
+        if (filteredIds.includes(d.deviceId)) {
+          deviceMap.set(d.deviceId, d);
+        }
+      }
+    }
+
+    return this.peakValleyCalculator.generateBill(area, deltas, startTime, endTime, deviceMap);
   }
 
   detectAnomalies(
@@ -324,7 +336,7 @@ export class SmartEnergySDK {
   }
 
   getEnergyLedger(
-    dimension: 'area' | 'building' | 'floor' | 'device',
+    dimension: 'area' | 'building' | 'floor' | 'device' | 'deviceGroup',
     deviceIds: string[],
     startTime: string,
     endTime: string,
@@ -341,7 +353,7 @@ export class SmartEnergySDK {
 
     const deltas = this.getDeltas(deviceIds, startTime, endTime);
 
-    const groups: Map<string, { devices: Set<string>; deltas: ConsumptionDelta[] }> = new Map();
+    const groups: Map<string, { devices: Set<string>; deltas: ConsumptionDelta[]; area: string }> = new Map();
 
     for (const delta of deltas) {
       const device = deviceMap.get(delta.deviceId);
@@ -361,16 +373,22 @@ export class SmartEnergySDK {
         case 'device':
           dimValue = device.deviceId;
           break;
+        case 'deviceGroup':
+          dimValue = device.deviceGroup || '未分组';
+          break;
         default:
           dimValue = device.area;
       }
 
       if (!groups.has(dimValue)) {
-        groups.set(dimValue, { devices: new Set(), deltas: [] });
+        groups.set(dimValue, { devices: new Set(), deltas: [], area: device.area });
       }
       const group = groups.get(dimValue)!;
       group.devices.add(delta.deviceId);
       group.deltas.push(delta);
+      if (dimension === 'device' || dimension === 'deviceGroup') {
+        group.area = device.area;
+      }
     }
 
     const ledgers: EnergyLedger[] = [];
@@ -385,8 +403,7 @@ export class SmartEnergySDK {
         const totalConsumption = typeDeltas.reduce((s, d) => s + d.consumption, 0);
         const firstDelta = typeDeltas[0];
 
-        const areaForPricing = dimension === 'area' ? dimValue : undefined;
-        const config = this.peakValleyCalculator.getEffectiveConfig(et, areaForPricing);
+        const config = this.peakValleyCalculator.getEffectiveConfig(et, group.area);
         currency = config.currency;
 
         const byPeriod: Map<TimePeriod, { consumption: number; cost: number }> = new Map();
@@ -470,7 +487,7 @@ export class SmartEnergySDK {
   }
 
   getLedgerDetail(
-    dimension: 'area' | 'building' | 'floor' | 'device',
+    dimension: 'area' | 'building' | 'floor' | 'device' | 'deviceGroup',
     deviceIds: string[],
     startTime: string,
     endTime: string,
@@ -528,6 +545,9 @@ export class SmartEnergySDK {
           break;
         case 'device':
           dimValue = device.deviceId;
+          break;
+        case 'deviceGroup':
+          dimValue = device.deviceGroup || '未分组';
           break;
         default:
           dimValue = device.area;
@@ -656,6 +676,187 @@ export class SmartEnergySDK {
     };
   }
 
+  reconcileBill(
+    area: string,
+    deviceIds: string[],
+    startTime: string,
+    endTime: string,
+  ): SDKResult<BillReconciliationResult> {
+    const areaDevicesResult = this.deviceArchive.queryByArea(area);
+    const areaDeviceIds = areaDevicesResult.success
+      ? areaDevicesResult.data.map(d => d.deviceId)
+      : [];
+    const filteredIds = deviceIds.filter(id => areaDeviceIds.includes(id));
+
+    const deltas = this.getDeltas(filteredIds, startTime, endTime);
+    const allEnergyTypes = new Set(deltas.map(d => d.reading.energyType));
+
+    const deviceMap = new Map<string, DeviceProfile>();
+    if (areaDevicesResult.success) {
+      for (const d of areaDevicesResult.data) {
+        if (filteredIds.includes(d.deviceId)) {
+          deviceMap.set(d.deviceId, d);
+        }
+      }
+    }
+
+    const areaTotals: Map<EnergyType, { consumption: number; cost: number; unit: string }> = new Map();
+    const floorTotals: Map<EnergyType, { consumption: number; cost: number; unit: string }> = new Map();
+    const deviceTotals: Map<EnergyType, { consumption: number; cost: number; unit: string }> = new Map();
+
+    for (const et of allEnergyTypes) {
+      areaTotals.set(et, { consumption: 0, cost: 0, unit: '' });
+      floorTotals.set(et, { consumption: 0, cost: 0, unit: '' });
+      deviceTotals.set(et, { consumption: 0, cost: 0, unit: '' });
+    }
+
+    const devicePerFloor: Map<string, Set<string>> = new Map();
+
+    for (const delta of deltas) {
+      const device = deviceMap.get(delta.deviceId);
+      if (!device) continue;
+
+      const et = delta.reading.energyType;
+      const config = this.peakValleyCalculator.getEffectiveConfig(et, area, device.deviceId);
+
+      let period: TimePeriod;
+      if (delta.reading.period) {
+        period = delta.reading.period;
+      } else {
+        const hour = new Date(delta.reading.timestamp).getUTCHours();
+        const rateConfig = config.periods.find(p => {
+          if (p.startHour <= p.endHour) {
+            return hour >= p.startHour && hour < p.endHour;
+          }
+          return hour >= p.startHour || hour < p.endHour;
+        });
+        period = rateConfig?.period || TimePeriod.Flat;
+      }
+      const rateConfig = config.periods.find(p => p.period === period);
+      const rate = rateConfig?.rate || 1.0;
+      const cost = delta.consumption * rate;
+
+      const areaStat = areaTotals.get(et)!;
+      areaStat.consumption += delta.consumption;
+      areaStat.cost += cost;
+      if (!areaStat.unit) areaStat.unit = delta.reading.unit;
+
+      const floor = device.floor;
+      if (!devicePerFloor.has(floor)) {
+        devicePerFloor.set(floor, new Set());
+      }
+      devicePerFloor.get(floor)!.add(delta.deviceId);
+
+      const floorStat = floorTotals.get(et)!;
+      floorStat.consumption += delta.consumption;
+      floorStat.cost += cost;
+      if (!floorStat.unit) floorStat.unit = delta.reading.unit;
+
+      const deviceStat = deviceTotals.get(et)!;
+      deviceStat.consumption += delta.consumption;
+      deviceStat.cost += cost;
+      if (!deviceStat.unit) deviceStat.unit = delta.reading.unit;
+    }
+
+    const items: BillReconciliationItem[] = [];
+    let totalAreaCost = 0;
+    let totalFloorCost = 0;
+    let totalDeviceCost = 0;
+    let overallDiff = 0;
+    let isBalanced = true;
+    const discrepancyDetails: {
+      dimension: string;
+      dimensionValue: string;
+      energyType: EnergyType;
+      expected: number;
+      actual: number;
+      diff: number;
+      unit: string;
+    }[] = [];
+
+    const floorConsumptionByTypeAndFloor: Map<string, Map<EnergyType, number>> = new Map();
+    for (const delta of deltas) {
+      const device = deviceMap.get(delta.deviceId);
+      if (!device) continue;
+      const floor = device.floor;
+      const et = delta.reading.energyType;
+      if (!floorConsumptionByTypeAndFloor.has(floor)) {
+        floorConsumptionByTypeAndFloor.set(floor, new Map());
+      }
+      const floorMap = floorConsumptionByTypeAndFloor.get(floor)!;
+      floorMap.set(et, (floorMap.get(et) || 0) + delta.consumption);
+    }
+
+    for (const et of allEnergyTypes) {
+      const areaStat = areaTotals.get(et)!;
+      const floorStat = floorTotals.get(et)!;
+      const deviceStat = deviceTotals.get(et)!;
+
+      areaStat.consumption = Math.round(areaStat.consumption * 1000) / 1000;
+      areaStat.cost = Math.round(areaStat.cost * 100) / 100;
+      floorStat.consumption = Math.round(floorStat.consumption * 1000) / 1000;
+      floorStat.cost = Math.round(floorStat.cost * 100) / 100;
+      deviceStat.consumption = Math.round(deviceStat.consumption * 1000) / 1000;
+      deviceStat.cost = Math.round(deviceStat.cost * 100) / 100;
+
+      const areaVsFloorDiff = Math.round((areaStat.consumption - floorStat.consumption) * 1000) / 1000;
+      const floorVsDeviceDiff = Math.round((floorStat.consumption - deviceStat.consumption) * 1000) / 1000;
+      const areaVsDeviceDiff = Math.round((areaStat.consumption - deviceStat.consumption) * 1000) / 1000;
+
+      const itemBalanced =
+        Math.abs(areaVsFloorDiff) < 0.001 &&
+        Math.abs(floorVsDeviceDiff) < 0.001 &&
+        Math.abs(areaVsDeviceDiff) < 0.001;
+
+      if (!itemBalanced) {
+        isBalanced = false;
+      }
+
+      items.push({
+        energyType: et,
+        areaTotal: areaStat.consumption,
+        floorTotal: floorStat.consumption,
+        deviceTotal: deviceStat.consumption,
+        areaVsFloorDiff,
+        floorVsDeviceDiff,
+        areaVsDeviceDiff,
+        unit: areaStat.unit,
+        isBalanced: itemBalanced,
+      });
+
+      totalAreaCost += areaStat.cost;
+      totalFloorCost += floorStat.cost;
+      totalDeviceCost += deviceStat.cost;
+    }
+
+    overallDiff = Math.round((totalAreaCost - totalDeviceCost) * 100) / 100;
+
+    const floors = Array.from(devicePerFloor.keys()).sort();
+    const perFloorAreaTotals: Map<string, Map<EnergyType, number>> = new Map();
+
+    const result: BillReconciliationResult = {
+      area,
+      startDate: startTime,
+      endDate: endTime,
+      items,
+      totalAreaCost: Math.round(totalAreaCost * 100) / 100,
+      totalFloorCost: Math.round(totalFloorCost * 100) / 100,
+      totalDeviceCost: Math.round(totalDeviceCost * 100) / 100,
+      overallDiff,
+      isBalanced,
+      currency: 'CNY',
+      discrepancyDetails,
+    };
+
+    return {
+      success: true,
+      code: isBalanced ? 'BALANCED' : 'IMBALANCED',
+      message: isBalanced ? '三口径数据一致，对账通过' : '发现口径差异，请核查明细',
+      data: result,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
   setAnomalyThreshold(threshold: number): void {
     this.anomalyDetector.setThreshold(threshold);
   }
@@ -693,6 +894,7 @@ export type {
   EnergySavingSuggestion,
   EfficiencyRanking,
   BillItem,
+  BillDeviceItem,
   BillSummary,
   TrendPoint,
   TrendResult,
@@ -701,6 +903,8 @@ export type {
   EnergyLedgerItem,
   EnergyLedger,
   EnergyLedgerDetail,
+  BillReconciliationItem,
+  BillReconciliationResult,
   SDKResult,
   PaginatedResult,
   SDKConfig,
