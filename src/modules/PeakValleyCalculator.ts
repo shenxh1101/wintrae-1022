@@ -336,14 +336,24 @@ export class PeakValleyCalculator {
 
     deviceBreakdown.sort((a, b) => a.deviceName.localeCompare(b.deviceName));
 
+    const planIdToName: Map<string, string> = new Map();
+    const planIdToEnergyType: Map<string, EnergyType> = new Map();
+    for (const devItem of deviceBreakdown) {
+      for (const item of devItem.items) {
+        if (item.pricePlanId) {
+          planIdToName.set(item.pricePlanId, item.pricePlanName || item.pricePlanId);
+          planIdToEnergyType.set(item.pricePlanId, item.energyType);
+        }
+      }
+    }
+
     const pricePlans: { energyType: EnergyType; planId: string; planName: string }[] = [];
     for (const [et, planIds] of usedPlansSet) {
       for (const planId of planIds) {
-        const config = this.getEffectiveConfig(et, area);
         pricePlans.push({
-          energyType: et,
+          energyType: planIdToEnergyType.get(planId) || et,
           planId,
-          planName: config.planName || planId,
+          planName: planIdToName.get(planId) || planId,
         });
       }
     }

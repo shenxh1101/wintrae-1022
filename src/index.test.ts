@@ -1162,4 +1162,226 @@ describe('SmartEnergySDK (Enhanced)', () => {
       expect(elecItem?.deviceTotal).toBeCloseTo(800, 3);
     });
   });
+
+  describe('18 - Cross-area floor/device-group ledger pricing', () => {
+    let sdk: SmartEnergySDK;
+    let devA1F: string;
+    let devB1F: string;
+
+    beforeEach(() => {
+      sdk = new SmartEnergySDK();
+
+      const r1 = sdk.registerDevice({
+        name: 'A区1楼电表',
+        energyType: EnergyType.Electricity,
+        area: 'A区',
+        floor: '1F',
+        building: '1号楼',
+        deviceGroup: 'HVAC',
+        ratedPower: 100,
+        installDate: '2024-01-01',
+        meterId: 'mA1',
+      });
+      devA1F = r1.data!.deviceId;
+
+      const r2 = sdk.registerDevice({
+        name: 'B区1楼电表',
+        energyType: EnergyType.Electricity,
+        area: 'B区',
+        floor: '1F',
+        building: '2号楼',
+        deviceGroup: 'HVAC',
+        ratedPower: 100,
+        installDate: '2024-01-01',
+        meterId: 'mB1',
+      });
+      devB1F = r2.data!.deviceId;
+
+      sdk.setAreaPriceConfig('A区', {
+        energyType: EnergyType.Electricity,
+        periods: [{ period: TimePeriod.Flat, startHour: 0, endHour: 24, rate: 1.0 }],
+        currency: 'CNY',
+        planId: 'area-a-plan',
+        planName: 'A区电价',
+      });
+      sdk.setAreaPriceConfig('B区', {
+        energyType: EnergyType.Electricity,
+        periods: [{ period: TimePeriod.Flat, startHour: 0, endHour: 24, rate: 2.0 }],
+        currency: 'CNY',
+        planId: 'area-b-plan',
+        planName: 'B区电价',
+      });
+
+      sdk.submitReading({ deviceId: devA1F, timestamp: '2024-06-01T00:00:00Z', value: 0, unit: 'kWh', energyType: EnergyType.Electricity });
+      sdk.submitReading({ deviceId: devA1F, timestamp: '2024-06-30T23:59:59Z', value: 100, unit: 'kWh', energyType: EnergyType.Electricity });
+      sdk.submitReading({ deviceId: devB1F, timestamp: '2024-06-01T00:00:00Z', value: 0, unit: 'kWh', energyType: EnergyType.Electricity });
+      sdk.submitReading({ deviceId: devB1F, timestamp: '2024-06-30T23:59:59Z', value: 100, unit: 'kWh', energyType: EnergyType.Electricity });
+    });
+
+    test('floor ledger with cross-area devices sums cost correctly per-area', () => {
+      const ledger = sdk.getEnergyLedger('floor', [devA1F, devB1F], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      expect(ledger.success).toBe(true);
+      expect(ledger.data.length).toBe(1);
+      const floor1F = ledger.data[0];
+      expect(floor1F.items[0].consumption).toBeCloseTo(200, 3);
+      expect(floor1F.totalCost).toBeCloseTo(300, 2);
+      expect(floor1F.items[0].pricePlanIds).toBeTruthy();
+      expect(floor1F.items[0].pricePlanIds!.length).toBe(2);
+    });
+
+    test('floor cross-area total equals sum of individual area bills', () => {
+      const ledger = sdk.getEnergyLedger('floor', [devA1F, devB1F], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      const billA = sdk.generateBill('A区', [devA1F, devB1F], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      const billB = sdk.generateBill('B区', [devA1F, devB1F], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      expect(ledger.data[0].totalCost).toBeCloseTo(billA.data.totalCost + billB.data.totalCost, 2);
+    });
+
+    test('device group ledger with cross-area devices sums correctly', () => {
+      const ledger = sdk.getEnergyLedger('deviceGroup', [devA1F, devB1F], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      expect(ledger.success).toBe(true);
+      expect(ledger.data.length).toBe(1);
+      const hvac = ledger.data[0];
+      expect(hvac.items[0].consumption).toBeCloseTo(200, 3);
+      expect(hvac.totalCost).toBeCloseTo(300, 2);
+    });
+  });
+
+  describe('19 - Bill pricePlans name matches planId correctly', () => {
+    let sdk: SmartEnergySDK;
+    let dev1: string;
+    let dev2: string;
+
+    beforeEach(() => {
+      sdk = new SmartEnergySDK();
+      const r1 = sdk.registerDevice({
+        name: '普通电表',
+        energyType: EnergyType.Electricity,
+        area: 'A区', floor: '1F', building: '1号楼',
+        ratedPower: 100, installDate: '2024-01-01', meterId: 'm1',
+      });
+      dev1 = r1.data!.deviceId;
+
+      const r2 = sdk.registerDevice({
+        name: 'VIP电表',
+        energyType: EnergyType.Electricity,
+        area: 'A区', floor: '1F', building: '1号楼',
+        ratedPower: 100, installDate: '2024-01-01', meterId: 'm2',
+      });
+      dev2 = r2.data!.deviceId;
+
+      sdk.setDevicePriceConfig(dev2, {
+        energyType: EnergyType.Electricity,
+        periods: [{ period: TimePeriod.Flat, startHour: 0, endHour: 24, rate: 5.0 }],
+        currency: 'CNY',
+        planId: 'vip-plan',
+        planName: 'VIP专属电价',
+      });
+
+      sdk.submitReading({ deviceId: dev1, timestamp: '2024-06-01T00:00:00Z', value: 0, unit: 'kWh', energyType: EnergyType.Electricity });
+      sdk.submitReading({ deviceId: dev1, timestamp: '2024-06-30T23:59:59Z', value: 100, unit: 'kWh', energyType: EnergyType.Electricity });
+      sdk.submitReading({ deviceId: dev2, timestamp: '2024-06-01T00:00:00Z', value: 0, unit: 'kWh', energyType: EnergyType.Electricity });
+      sdk.submitReading({ deviceId: dev2, timestamp: '2024-06-30T23:59:59Z', value: 100, unit: 'kWh', energyType: EnergyType.Electricity });
+    });
+
+    test('bill pricePlans list has correct planName for each planId', () => {
+      const bill = sdk.generateBill('A区', [dev1, dev2], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      expect(bill.success).toBe(true);
+      expect(bill.data.pricePlans).toBeTruthy();
+      expect(bill.data.pricePlans!.length).toBeGreaterThanOrEqual(2);
+
+      const vipPlan = bill.data.pricePlans!.find(p => p.planId === 'vip-plan');
+      expect(vipPlan).toBeTruthy();
+      expect(vipPlan?.planName).toBe('VIP专属电价');
+
+      const defaultPlan = bill.data.pricePlans!.find(p => p.planId !== 'vip-plan');
+      expect(defaultPlan).toBeTruthy();
+      expect(defaultPlan?.planName).not.toBe('VIP专属电价');
+    });
+
+    test('device breakdown item has its own price plan name', () => {
+      const bill = sdk.generateBill('A区', [dev1, dev2], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      const vipDev = bill.data.deviceBreakdown!.find(d => d.deviceId === dev2);
+      expect(vipDev).toBeTruthy();
+      expect(vipDev?.pricePlanName).toBe('VIP专属电价');
+    });
+  });
+
+  describe('20 - Multi-energy reconciliation with separate cost/consumption diffs', () => {
+    let sdk: SmartEnergySDK;
+    let elecDev: string;
+    let waterDev: string;
+    let gasDev: string;
+
+    beforeEach(() => {
+      sdk = new SmartEnergySDK();
+      const r1 = sdk.registerDevice({
+        name: '电表', energyType: EnergyType.Electricity,
+        area: 'A区', floor: '1F', building: '1号楼',
+        ratedPower: 100, installDate: '2024-01-01', meterId: 'mE',
+      });
+      elecDev = r1.data!.deviceId;
+      const r2 = sdk.registerDevice({
+        name: '水表', energyType: EnergyType.Water,
+        area: 'A区', floor: '1F', building: '1号楼',
+        ratedPower: 0, installDate: '2024-01-01', meterId: 'mW',
+      });
+      waterDev = r2.data!.deviceId;
+      const r3 = sdk.registerDevice({
+        name: '气表', energyType: EnergyType.Gas,
+        area: 'A区', floor: '1F', building: '1号楼',
+        ratedPower: 0, installDate: '2024-01-01', meterId: 'mG',
+      });
+      gasDev = r3.data!.deviceId;
+
+      sdk.submitReading({ deviceId: elecDev, timestamp: '2024-06-01T00:00:00Z', value: 0, unit: 'kWh', energyType: EnergyType.Electricity });
+      sdk.submitReading({ deviceId: elecDev, timestamp: '2024-06-30T23:59:59Z', value: 500, unit: 'kWh', energyType: EnergyType.Electricity });
+      sdk.submitReading({ deviceId: waterDev, timestamp: '2024-06-01T00:00:00Z', value: 0, unit: 'm³', energyType: EnergyType.Water });
+      sdk.submitReading({ deviceId: waterDev, timestamp: '2024-06-30T23:59:59Z', value: 50, unit: 'm³', energyType: EnergyType.Water });
+      sdk.submitReading({ deviceId: gasDev, timestamp: '2024-06-01T00:00:00Z', value: 0, unit: 'm³', energyType: EnergyType.Gas });
+      sdk.submitReading({ deviceId: gasDev, timestamp: '2024-06-30T23:59:59Z', value: 30, unit: 'm³', energyType: EnergyType.Gas });
+    });
+
+    test('reconciliation returns separate item per energy type', () => {
+      const recon = sdk.reconcileBill('A区', [elecDev, waterDev, gasDev], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      expect(recon.success).toBe(true);
+      expect(recon.data.items.length).toBe(3);
+      expect(recon.data.isBalanced).toBe(true);
+
+      const elec = recon.data.items.find(i => i.energyType === EnergyType.Electricity);
+      const water = recon.data.items.find(i => i.energyType === EnergyType.Water);
+      const gas = recon.data.items.find(i => i.energyType === EnergyType.Gas);
+      expect(elec).toBeTruthy();
+      expect(water).toBeTruthy();
+      expect(gas).toBeTruthy();
+      expect(elec?.unit).toBe('kWh');
+      expect(water?.unit).toBe('m³');
+      expect(gas?.unit).toBe('m³');
+    });
+
+    test('each energy type has consumption and cost diffs reported separately', () => {
+      const recon = sdk.reconcileBill('A区', [elecDev, waterDev, gasDev], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      expect(recon.success).toBe(true);
+      for (const item of recon.data.items) {
+        expect(typeof item.areaTotal).toBe('number');
+        expect(typeof item.areaCost).toBe('number');
+        expect(typeof item.areaVsFloorDiff).toBe('number');
+        expect(typeof item.areaVsFloorCostDiff).toBe('number');
+        expect(item.isBalanced).toBe(true);
+      }
+
+      const water = recon.data.items.find(i => i.energyType === EnergyType.Water);
+      expect(water?.areaTotal).toBeCloseTo(50, 3);
+      expect(water?.areaCost).toBeCloseTo(250, 2);
+
+      const gas = recon.data.items.find(i => i.energyType === EnergyType.Gas);
+      expect(gas?.areaTotal).toBeCloseTo(30, 3);
+      expect(gas?.areaCost).toBeCloseTo(90, 2);
+    });
+
+    test('total cost equals sum of all energy type costs', () => {
+      const recon = sdk.reconcileBill('A区', [elecDev, waterDev, gasDev], '2024-06-01T00:00:00Z', '2024-06-30T23:59:59Z');
+      const sumAreaCost = recon.data.items.reduce((s: number, i) => s + i.areaCost, 0);
+      expect(recon.data.totalAreaCost).toBeCloseTo(sumAreaCost, 2);
+    });
+  });
 });

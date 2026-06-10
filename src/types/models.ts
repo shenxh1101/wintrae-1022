@@ -195,6 +195,7 @@ export interface EnergyLedgerItem {
   flatCost?: number;
   pricePlanId?: string;
   pricePlanName?: string;
+  pricePlanIds?: string[];
 }
 
 export interface EnergyLedger {
@@ -229,6 +230,13 @@ export interface BillReconciliationItem {
   floorVsDeviceDiff: number;
   areaVsDeviceDiff: number;
   unit: string;
+  areaCost: number;
+  floorCost: number;
+  deviceCost: number;
+  areaVsFloorCostDiff: number;
+  floorVsDeviceCostDiff: number;
+  areaVsDeviceCostDiff: number;
+  currency: string;
   isBalanced: boolean;
 }
 
