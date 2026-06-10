@@ -9,6 +9,7 @@ import {
   SDKResult,
 } from '../types';
 import { createSuccessResult, createErrorResult, generateId } from '../utils';
+import type { ConsumptionDelta } from './EnergyStatistics';
 
 const DEFAULT_PEAK_VALLEY_CONFIGS: PeakValleyConfig[] = [
   {
@@ -64,25 +65,26 @@ export class PeakValleyCalculator {
     return createSuccessResult(period);
   }
 
-  calculateConsumption(
-    readings: MeterReading[],
+  calculateConsumptionByPeriod(
+    deltas: ConsumptionDelta[],
   ): SDKResult<Map<TimePeriod, number>> {
     const byPeriod: Map<TimePeriod, number> = new Map();
     byPeriod.set(TimePeriod.Peak, 0);
     byPeriod.set(TimePeriod.Valley, 0);
     byPeriod.set(TimePeriod.Flat, 0);
 
-    for (const reading of readings) {
-      const config = this.configs.get(reading.energyType);
+    for (const delta of deltas) {
+      const config = this.configs.get(delta.reading.energyType);
       if (!config) continue;
 
-      if (reading.period) {
-        byPeriod.set(reading.period, (byPeriod.get(reading.period) || 0) + reading.value);
+      let period: TimePeriod;
+      if (delta.reading.period) {
+        period = delta.reading.period;
       } else {
-        const hour = new Date(reading.timestamp).getHours();
-        const period = this.findPeriod(config.periods, hour);
-        byPeriod.set(period, (byPeriod.get(period) || 0) + reading.value);
+        const hour = new Date(delta.reading.timestamp).getUTCHours();
+        period = this.findPeriod(config.periods, hour);
       }
+      byPeriod.set(period, (byPeriod.get(period) || 0) + delta.consumption);
     }
 
     return createSuccessResult(byPeriod);
@@ -90,7 +92,7 @@ export class PeakValleyCalculator {
 
   calculateFee(
     energyType: EnergyType,
-    readings: MeterReading[],
+    deltas: ConsumptionDelta[],
   ): SDKResult<BillItem[]> {
     const config = this.configs.get(energyType);
     if (!config) {
@@ -98,18 +100,18 @@ export class PeakValleyCalculator {
     }
 
     const consumptionByPeriod: Map<TimePeriod, number> = new Map();
-    for (const reading of readings) {
-      if (reading.energyType !== energyType) continue;
+    for (const delta of deltas) {
+      if (delta.reading.energyType !== energyType) continue;
 
       let period: TimePeriod;
-      if (reading.period) {
-        period = reading.period;
+      if (delta.reading.period) {
+        period = delta.reading.period;
       } else {
-        const hour = new Date(reading.timestamp).getHours();
+        const hour = new Date(delta.reading.timestamp).getUTCHours();
         period = this.findPeriod(config.periods, hour);
       }
 
-      consumptionByPeriod.set(period, (consumptionByPeriod.get(period) || 0) + reading.value);
+      consumptionByPeriod.set(period, (consumptionByPeriod.get(period) || 0) + delta.consumption);
     }
 
     const items: BillItem[] = [];
@@ -130,16 +132,16 @@ export class PeakValleyCalculator {
 
   generateBill(
     area: string,
-    readings: MeterReading[],
+    deltas: ConsumptionDelta[],
     startDate: string,
     endDate: string,
   ): SDKResult<BillSummary> {
-    const energyTypes = new Set(readings.map(r => r.energyType));
+    const energyTypes = new Set(deltas.map(d => d.reading.energyType));
     const allItems: BillItem[] = [];
     let totalCost = 0;
 
     for (const et of energyTypes) {
-      const result = this.calculateFee(et, readings);
+      const result = this.calculateFee(et, deltas);
       if (result.success) {
         allItems.push(...result.data);
         totalCost += result.data.reduce((sum, item) => sum + item.cost, 0);

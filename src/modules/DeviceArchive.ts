@@ -83,4 +83,8 @@ export class DeviceArchive {
   count(): number {
     return this.devices.size;
   }
+
+  getDeviceMap(): Map<string, DeviceProfile> {
+    return this.devices;
+  }
 }

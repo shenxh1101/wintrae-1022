@@ -5,6 +5,8 @@ import {
   PeakValleyCalculator,
   AnomalyDetector,
   EnergyAdvisor,
+  BatchReadingSummary,
+  ConsumptionDelta,
 } from './modules';
 
 import {
@@ -24,15 +26,8 @@ import {
   SDKConfig,
   EnergyType,
   AggregationType,
-  TimePeriod,
-  AnomalyType,
-  AlertLevel,
-  DeviceStatus,
   ReadingQuality,
-  PaginatedResult,
-  PeakValleyPeriod,
   BillItem,
-  TrendPoint,
 } from './types';
 
 export class SmartEnergySDK {
@@ -48,7 +43,7 @@ export class SmartEnergySDK {
   constructor(config: SDKConfig = {}) {
     this.config = config;
     this.deviceArchive = new DeviceArchive();
-    this.readingValidator = new ReadingValidator();
+    this.readingValidator = new ReadingValidator(this.deviceArchive.getDeviceMap());
     this.energyStatistics = new EnergyStatistics();
     this.peakValleyCalculator = new PeakValleyCalculator(config.peakValleyConfigs);
     this.anomalyDetector = new AnomalyDetector(config.alertRules, config.anomalyThreshold);
@@ -56,7 +51,9 @@ export class SmartEnergySDK {
   }
 
   registerDevice(device: Omit<DeviceProfile, 'deviceId' | 'status'>): SDKResult<DeviceProfile> {
-    return this.deviceArchive.register(device);
+    const result = this.deviceArchive.register(device);
+    this.readingValidator.setDeviceArchive(this.deviceArchive.getDeviceMap());
+    return result;
   }
 
   queryDevice(deviceId: string): SDKResult<DeviceProfile | null> {
@@ -68,11 +65,19 @@ export class SmartEnergySDK {
   }
 
   updateDevice(deviceId: string, updates: Partial<Omit<DeviceProfile, 'deviceId'>>): SDKResult<DeviceProfile> {
-    return this.deviceArchive.update(deviceId, updates);
+    const result = this.deviceArchive.update(deviceId, updates);
+    if (result.success) {
+      this.readingValidator.setDeviceArchive(this.deviceArchive.getDeviceMap());
+    }
+    return result;
   }
 
   deleteDevice(deviceId: string): SDKResult<boolean> {
-    return this.deviceArchive.delete(deviceId);
+    const result = this.deviceArchive.delete(deviceId);
+    if (result.success) {
+      this.readingValidator.setDeviceArchive(this.deviceArchive.getDeviceMap());
+    }
+    return result;
   }
 
   listDevices(): SDKResult<DeviceProfile[]> {
@@ -80,19 +85,11 @@ export class SmartEnergySDK {
   }
 
   submitReading(reading: Omit<MeterReading, 'readingId' | 'quality'>): SDKResult<MeterReading> {
-    const result = this.readingValidator.submitReading(reading);
-    if (result.success) {
-      this.energyStatistics.loadReadings([result.data]);
-    }
-    return result;
+    return this.readingValidator.submitReading(reading);
   }
 
-  submitReadings(readings: Omit<MeterReading, 'readingId' | 'quality'>[]): SDKResult<MeterReading[]> {
-    const result = this.readingValidator.submitBatch(readings);
-    if (result.success) {
-      this.energyStatistics.loadReadings(result.data);
-    }
-    return result;
+  submitReadings(readings: Omit<MeterReading, 'readingId' | 'quality'>[]): SDKResult<BatchReadingSummary> {
+    return this.readingValidator.submitBatch(readings);
   }
 
   validateReading(readingId: string): SDKResult<{ valid: boolean; quality: ReadingQuality; issues: string[] }> {
@@ -111,13 +108,19 @@ export class SmartEnergySDK {
     return this.readingValidator.getCorrections(deviceId);
   }
 
+  private getDeltas(deviceIds: string[], startTime: string, endTime: string): ConsumptionDelta[] {
+    const { items } = this.readingValidator.computeAllDeltas(deviceIds, startTime, endTime);
+    return items;
+  }
+
   queryAreaConsumption(
     area: string,
     deviceIds: string[],
     startTime: string,
     endTime: string,
   ): SDKResult<AreaConsumption[]> {
-    return this.energyStatistics.queryAreaConsumption(area, deviceIds, startTime, endTime);
+    const deltas = this.getDeltas(deviceIds, startTime, endTime);
+    return this.energyStatistics.queryAreaConsumption(area, deltas);
   }
 
   getItemizedStatistics(
@@ -135,7 +138,8 @@ export class SmartEnergySDK {
         }
       }
     }
-    return this.energyStatistics.itemizedStatistics(deviceIds, startTime, endTime, categoryField, devices);
+    const deltas = this.getDeltas(deviceIds, startTime, endTime);
+    return this.energyStatistics.itemizedStatistics(deltas, categoryField, devices);
   }
 
   getTrend(
@@ -146,7 +150,8 @@ export class SmartEnergySDK {
     endTime: string,
     area?: string,
   ): SDKResult<TrendResult> {
-    return this.energyStatistics.trendAnalysis(deviceIds, energyType, aggregationType, startTime, endTime, area);
+    const deltas = this.getDeltas(deviceIds, startTime, endTime);
+    return this.energyStatistics.trendAnalysis(deltas, energyType, aggregationType, area);
   }
 
   getMultiEnergyTrend(
@@ -156,11 +161,18 @@ export class SmartEnergySDK {
     endTime: string,
     area?: string,
   ): SDKResult<TrendResult[]> {
-    return this.energyStatistics.multiEnergyTrend(deviceIds, aggregationType, startTime, endTime, area);
+    const deltas = this.getDeltas(deviceIds, startTime, endTime);
+    return this.energyStatistics.multiEnergyTrend(deltas, aggregationType, area);
   }
 
-  calculatePeakValleyFee(energyType: EnergyType, readings: MeterReading[]): SDKResult<BillItem[]> {
-    return this.peakValleyCalculator.calculateFee(energyType, readings);
+  calculatePeakValleyFee(
+    energyType: EnergyType,
+    deviceIds: string[],
+    startTime: string,
+    endTime: string,
+  ): SDKResult<BillItem[]> {
+    const deltas = this.getDeltas(deviceIds, startTime, endTime);
+    return this.peakValleyCalculator.calculateFee(energyType, deltas);
   }
 
   generateBill(
@@ -169,14 +181,8 @@ export class SmartEnergySDK {
     startTime: string,
     endTime: string,
   ): SDKResult<BillSummary> {
-    const allReadings: MeterReading[] = [];
-    for (const deviceId of deviceIds) {
-      const result = this.readingValidator.getReadingsByDevice(deviceId, startTime, endTime);
-      if (result.success) {
-        allReadings.push(...result.data);
-      }
-    }
-    return this.peakValleyCalculator.generateBill(area, allReadings, startTime, endTime);
+    const deltas = this.getDeltas(deviceIds, startTime, endTime);
+    return this.peakValleyCalculator.generateBill(area, deltas, startTime, endTime);
   }
 
   detectAnomalies(
@@ -212,21 +218,13 @@ export class SmartEnergySDK {
       return readingResult as SDKResult<null>;
     }
 
-    const deviceReadings = this.readingValidator.getReadingsByDevice(readingResult.data.deviceId);
-    if (!deviceReadings.success || deviceReadings.data.length < 2) {
-      return { success: true, code: 'INSUFFICIENT_DATA', message: '数据不足以进行突增突降检测', data: null, timestamp: new Date().toISOString() };
-    }
-
-    const sorted = deviceReadings.data.sort(
-      (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
-    );
-
-    const currentIdx = sorted.findIndex(r => r.readingId === readingId);
-    if (currentIdx < 0 || currentIdx >= sorted.length - 1) {
+    const reading = readingResult.data;
+    const previous = this.readingValidator.getPreviousReading(reading.deviceId, reading.timestamp);
+    if (!previous) {
       return { success: true, code: 'NO_PREVIOUS', message: '无前序读数可比', data: null, timestamp: new Date().toISOString() };
     }
 
-    return this.anomalyDetector.detectSuddenChange(sorted[currentIdx], sorted[currentIdx + 1]);
+    return this.anomalyDetector.detectSuddenChange(reading, previous);
   }
 
   getOverLimitAlerts(energyType?: EnergyType): SDKResult<AnomalyRecord[]> {
@@ -250,7 +248,7 @@ export class SmartEnergySDK {
     return this.anomalyDetector.getRules();
   }
 
-  getEfficiencyRanking(deviceIds: string[], topN = 10): SDKResult<EfficiencyRanking[]> {
+  getEfficiencyRanking(deviceIds: string[], startTime: string, endTime: string, topN = 10): SDKResult<EfficiencyRanking[]> {
     const deviceMap = new Map<string, DeviceProfile>();
     const allDevices = this.deviceArchive.listAll();
     if (allDevices.success) {
@@ -261,19 +259,14 @@ export class SmartEnergySDK {
       }
     }
 
-    const readings: MeterReading[] = [];
-    for (const deviceId of deviceIds) {
-      const result = this.readingValidator.getReadingsByDevice(deviceId);
-      if (result.success) {
-        readings.push(...result.data);
-      }
-    }
-
-    return this.energyAdvisor.generateEfficiencyRanking(readings, deviceMap, topN);
+    const deltas = this.getDeltas(deviceIds, startTime, endTime);
+    return this.energyAdvisor.generateEfficiencyRanking(deltas, deviceMap, topN);
   }
 
   getSavingSuggestions(
     deviceIds: string[],
+    startTime: string,
+    endTime: string,
     season: 'summer' | 'winter' | 'spring_autumn' = 'spring_autumn',
   ): SDKResult<EnergySavingSuggestion[]> {
     const deviceMap = new Map<string, DeviceProfile>();
@@ -286,15 +279,8 @@ export class SmartEnergySDK {
       }
     }
 
-    const readings: MeterReading[] = [];
-    for (const deviceId of deviceIds) {
-      const result = this.readingValidator.getReadingsByDevice(deviceId);
-      if (result.success) {
-        readings.push(...result.data);
-      }
-    }
-
-    return this.energyAdvisor.generateSavingSuggestions(readings, deviceMap, season);
+    const deltas = this.getDeltas(deviceIds, startTime, endTime);
+    return this.energyAdvisor.generateSavingSuggestions(deltas, deviceMap, season);
   }
 
   getBillSummary(bills: BillSummary[]): SDKResult<{
@@ -321,3 +307,43 @@ export class SmartEnergySDK {
 }
 
 export default SmartEnergySDK;
+export {
+  DeviceArchive,
+  ReadingValidator,
+  EnergyStatistics,
+  PeakValleyCalculator,
+  AnomalyDetector,
+  EnergyAdvisor,
+  BatchReadingResult,
+  BatchReadingSummary,
+  ConsumptionDelta,
+} from './modules';
+export {
+  EnergyType,
+  TimePeriod,
+  AggregationType,
+  AnomalyType,
+  AlertLevel,
+  DeviceStatus,
+  ReadingQuality,
+} from './types';
+export type {
+  DeviceProfile,
+  MeterReading,
+  ManualCorrection,
+  PeakValleyPeriod,
+  PeakValleyConfig,
+  AnomalyRecord,
+  AlertRule,
+  EnergySavingSuggestion,
+  EfficiencyRanking,
+  BillItem,
+  BillSummary,
+  TrendPoint,
+  TrendResult,
+  AreaConsumption,
+  ItemizedStat,
+  SDKResult,
+  PaginatedResult,
+  SDKConfig,
+} from './types';

@@ -1,5 +1,4 @@
 import {
-  MeterReading,
   EfficiencyRanking,
   EnergySavingSuggestion,
   BillSummary,
@@ -8,6 +7,7 @@ import {
   SDKResult,
 } from '../types';
 import { createSuccessResult, generateId } from '../utils';
+import type { ConsumptionDelta } from './EnergyStatistics';
 
 interface DeviceConsumption {
   deviceId: string;
@@ -23,26 +23,26 @@ export class EnergyAdvisor {
   private suggestions: Map<string, EnergySavingSuggestion> = new Map();
 
   generateEfficiencyRanking(
-    readings: MeterReading[],
+    deltas: ConsumptionDelta[],
     devices: Map<string, DeviceProfile>,
     topN = 10,
   ): SDKResult<EfficiencyRanking[]> {
     const consumption: Map<string, DeviceConsumption> = new Map();
 
-    for (const reading of readings) {
-      const device = devices.get(reading.deviceId);
+    for (const delta of deltas) {
+      const device = devices.get(delta.deviceId);
       if (!device) continue;
 
-      const existing = consumption.get(reading.deviceId);
+      const existing = consumption.get(delta.deviceId);
       if (existing) {
-        existing.consumption += reading.value;
+        existing.consumption += delta.consumption;
       } else {
-        consumption.set(reading.deviceId, {
-          deviceId: reading.deviceId,
+        consumption.set(delta.deviceId, {
+          deviceId: delta.deviceId,
           deviceName: device.name,
           area: device.area,
-          energyType: reading.energyType,
-          consumption: reading.value,
+          energyType: delta.reading.energyType,
+          consumption: delta.consumption,
           ratedPower: device.ratedPower,
           hoursUsed: 0,
         });
@@ -80,24 +80,24 @@ export class EnergyAdvisor {
   }
 
   generateSavingSuggestions(
-    readings: MeterReading[],
+    deltas: ConsumptionDelta[],
     devices: Map<string, DeviceProfile>,
     avgTempSeason: 'summer' | 'winter' | 'spring_autumn' = 'spring_autumn',
   ): SDKResult<EnergySavingSuggestion[]> {
     const newSuggestions: EnergySavingSuggestion[] = [];
 
     const byDevice: Map<string, { total: number; energyType: EnergyType; name: string; area: string; ratedPower: number }> = new Map();
-    for (const reading of readings) {
-      const device = devices.get(reading.deviceId);
+    for (const delta of deltas) {
+      const device = devices.get(delta.deviceId);
       if (!device) continue;
 
-      const existing = byDevice.get(reading.deviceId);
+      const existing = byDevice.get(delta.deviceId);
       if (existing) {
-        existing.total += reading.value;
+        existing.total += delta.consumption;
       } else {
-        byDevice.set(reading.deviceId, {
-          total: reading.value,
-          energyType: reading.energyType,
+        byDevice.set(delta.deviceId, {
+          total: delta.consumption,
+          energyType: delta.reading.energyType,
           name: device.name,
           area: device.area,
           ratedPower: device.ratedPower,

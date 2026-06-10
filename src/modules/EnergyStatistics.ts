@@ -8,42 +8,35 @@ import {
   AggregationType,
   EnergyType,
 } from '../types';
-import { createSuccessResult, createErrorResult } from '../utils';
+import { createSuccessResult } from '../utils';
+
+export interface ConsumptionDelta {
+  reading: MeterReading;
+  consumption: number;
+  deviceId: string;
+}
 
 export class EnergyStatistics {
-  private readings: Map<string, MeterReading> = new Map();
-
-  loadReadings(readings: MeterReading[]): void {
-    for (const r of readings) {
-      this.readings.set(r.readingId, r);
-    }
-  }
-
   queryAreaConsumption(
     area: string,
-    deviceIds: string[],
-    startTime: string,
-    endTime: string,
+    deltas: ConsumptionDelta[],
   ): SDKResult<AreaConsumption[]> {
-    const start = new Date(startTime).getTime();
-    const end = new Date(endTime).getTime();
-    const results: AreaConsumption[] = [];
     const byType: Map<EnergyType, { total: number; unit: string }> = new Map();
 
-    for (const reading of this.readings.values()) {
-      if (!deviceIds.includes(reading.deviceId)) continue;
-      const ts = new Date(reading.timestamp).getTime();
-      if (ts < start || ts > end) continue;
-
-      const existing = byType.get(reading.energyType);
+    for (const delta of deltas) {
+      const existing = byType.get(delta.reading.energyType);
       if (existing) {
-        existing.total += reading.value;
+        existing.total += delta.consumption;
       } else {
-        byType.set(reading.energyType, { total: reading.value, unit: reading.unit });
+        byType.set(delta.reading.energyType, {
+          total: delta.consumption,
+          unit: delta.reading.unit,
+        });
       }
     }
 
     const totalAll = Array.from(byType.values()).reduce((sum, v) => sum + v.total, 0);
+    const results: AreaConsumption[] = [];
 
     for (const [energyType, { total, unit }] of byType) {
       results.push({
@@ -51,7 +44,7 @@ export class EnergyStatistics {
         energyType,
         consumption: Math.round(total * 1000) / 1000,
         unit,
-        period: `${startTime}~${endTime}`,
+        period: area,
         percentage: totalAll > 0 ? Math.round((total / totalAll) * 10000) / 100 : 0,
       });
     }
@@ -60,9 +53,7 @@ export class EnergyStatistics {
   }
 
   itemizedStatistics(
-    deviceIds: string[],
-    startTime: string,
-    endTime: string,
+    deltas: ConsumptionDelta[],
     categoryField: 'area' | 'building' | 'floor' = 'area',
     deviceProfiles?: Map<string, { area: string; building: string; floor: string }>,
   ): SDKResult<ItemizedStat[]> {
@@ -70,16 +61,10 @@ export class EnergyStatistics {
       return createSuccessResult([]);
     }
 
-    const start = new Date(startTime).getTime();
-    const end = new Date(endTime).getTime();
     const categoryMap: Map<string, Map<EnergyType, { total: number; unit: string }>> = new Map();
 
-    for (const reading of this.readings.values()) {
-      if (!deviceIds.includes(reading.deviceId)) continue;
-      const ts = new Date(reading.timestamp).getTime();
-      if (ts < start || ts > end) continue;
-
-      const profile = deviceProfiles.get(reading.deviceId);
+    for (const delta of deltas) {
+      const profile = deviceProfiles.get(delta.deviceId);
       if (!profile) continue;
 
       const category = profile[categoryField];
@@ -87,21 +72,23 @@ export class EnergyStatistics {
         categoryMap.set(category, new Map());
       }
       const typeMap = categoryMap.get(category)!;
-      const existing = typeMap.get(reading.energyType);
+      const existing = typeMap.get(delta.reading.energyType);
       if (existing) {
-        existing.total += reading.value;
+        existing.total += delta.consumption;
       } else {
-        typeMap.set(reading.energyType, { total: reading.value, unit: reading.unit });
+        typeMap.set(delta.reading.energyType, {
+          total: delta.consumption,
+          unit: delta.reading.unit,
+        });
       }
     }
 
-    const grandTotal = Array.from(categoryMap.values())
-      .reduce((sum, typeMap) => {
-        for (const { total } of typeMap.values()) {
-          sum += total;
-        }
-        return sum;
-      }, 0);
+    const grandTotal = Array.from(categoryMap.values()).reduce((sum, typeMap) => {
+      for (const { total } of typeMap.values()) {
+        sum += total;
+      }
+      return sum;
+    }, 0);
 
     const results: ItemizedStat[] = [];
     for (const [category, typeMap] of categoryMap) {
@@ -132,42 +119,30 @@ export class EnergyStatistics {
   }
 
   trendAnalysis(
-    deviceIds: string[],
+    deltas: ConsumptionDelta[],
     energyType: EnergyType,
     aggregationType: AggregationType,
-    startTime: string,
-    endTime: string,
     area?: string,
   ): SDKResult<TrendResult> {
-    const start = new Date(startTime).getTime();
-    const end = new Date(endTime).getTime();
-    const filtered: MeterReading[] = [];
-
-    for (const reading of this.readings.values()) {
-      if (!deviceIds.includes(reading.deviceId)) continue;
-      if (reading.energyType !== energyType) continue;
-      const ts = new Date(reading.timestamp).getTime();
-      if (ts < start || ts > end) continue;
-      filtered.push(reading);
-    }
-
     const buckets: Map<string, number> = new Map();
 
-    for (const reading of filtered) {
-      const date = new Date(reading.timestamp);
+    for (const delta of deltas) {
+      if (delta.reading.energyType !== energyType) continue;
+
+      const date = new Date(delta.reading.timestamp);
       let key: string;
       switch (aggregationType) {
         case AggregationType.Day:
-          key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+          key = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
           break;
         case AggregationType.Month:
-          key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+          key = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
           break;
         case AggregationType.Year:
-          key = `${date.getFullYear()}`;
+          key = `${date.getUTCFullYear()}`;
           break;
       }
-      buckets.set(key, (buckets.get(key) || 0) + reading.value);
+      buckets.set(key, (buckets.get(key) || 0) + delta.consumption);
     }
 
     const points: TrendPoint[] = Array.from(buckets.entries())
@@ -187,17 +162,15 @@ export class EnergyStatistics {
   }
 
   multiEnergyTrend(
-    deviceIds: string[],
+    deltas: ConsumptionDelta[],
     aggregationType: AggregationType,
-    startTime: string,
-    endTime: string,
     area?: string,
   ): SDKResult<TrendResult[]> {
     const types = [EnergyType.Electricity, EnergyType.Water, EnergyType.Gas, EnergyType.Heat];
     const results: TrendResult[] = [];
 
     for (const et of types) {
-      const result = this.trendAnalysis(deviceIds, et, aggregationType, startTime, endTime, area);
+      const result = this.trendAnalysis(deltas, et, aggregationType, area);
       if (result.success && result.data.points.length > 0) {
         results.push(result.data);
       }
